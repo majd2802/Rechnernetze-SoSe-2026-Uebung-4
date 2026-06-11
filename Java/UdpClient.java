@@ -3,29 +3,32 @@ import java.io.InputStreamReader;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class UdpClient {
+
+    private static final Map<String, InetSocketAddress> recipients =
+            new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws Exception {
 
         if (args.length != 2) {
-
-            System.out.println(
-                    "Usage: java UdpClient <name> <port>"
-            );
-
+            System.out.println("Usage: java UdpClient <name> <port>");
             return;
         }
 
         String ownName = args[0];
         int ownPort = Integer.parseInt(args[1]);
 
-        DatagramSocket socket =
-                new DatagramSocket(ownPort);
+        DatagramSocket socket = new DatagramSocket(ownPort);
 
         System.out.println("UDP gestartet:");
         System.out.println("Name: " + ownName);
         System.out.println("Port: " + ownPort);
+        printHelp();
 
         // =====================================================
         // RECEIVER THREAD
@@ -40,10 +43,7 @@ public class UdpClient {
                 try {
 
                     DatagramPacket packet =
-                            new DatagramPacket(
-                                    buffer,
-                                    buffer.length
-                            );
+                            new DatagramPacket(buffer, buffer.length);
 
                     socket.receive(packet);
 
@@ -51,23 +51,22 @@ public class UdpClient {
                             packet.getData(),
                             0,
                             packet.getLength(),
-                            "UTF-8"
+                            StandardCharsets.UTF_8
                     );
 
-                    System.out.println(
-                            "\nEmpfangen von "
-                                    + packet.getAddress()
-                                    .getHostAddress()
-                                    + ":"
-                                    + packet.getPort()
-                    );
-
+                    System.out.println();
+                    System.out.println("Empfangen von "
+                            + packet.getAddress().getHostAddress()
+                            + ":"
+                            + packet.getPort());
                     System.out.println(message);
-
                     System.out.print("> ");
 
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    if (!socket.isClosed()) {
+                        e.printStackTrace();
+                    }
+                    break;
                 }
             }
         });
@@ -75,9 +74,7 @@ public class UdpClient {
         receiver.start();
 
         BufferedReader keyboard =
-                new BufferedReader(
-                        new InputStreamReader(System.in)
-                );
+                new BufferedReader(new InputStreamReader(System.in));
 
         // =====================================================
         // INPUT LOOP
@@ -89,56 +86,143 @@ public class UdpClient {
 
             String input = keyboard.readLine();
 
+            if (input == null) {
+                continue;
+            }
+
+            input = input.trim();
+
             // =================================================
-            // SEND
+            // REGISTER
+            // register <Name> <IP-Adresse> <Port>
             // =================================================
 
-            if (input.startsWith("send ")) {
+            if (input.startsWith("register ")) {
 
-                String[] parts =
-                        input.split(" ", 4);
+                String[] parts = input.split("\\s+", 4);
 
                 if (parts.length != 4) {
+                    System.out.println("Usage: register <Name> <IP-Adresse> <Port>");
+                    continue;
+                }
 
-                    System.out.println(
-                            "Usage: send <ip> <port> <message>"
-                    );
+                String name = parts[1];
+                String ip = parts[2];
+                int port = Integer.parseInt(parts[3]);
 
+                InetSocketAddress address =
+                        new InetSocketAddress(InetAddress.getByName(ip), port);
+
+                recipients.put(name, address);
+
+                System.out.println("Empfänger gespeichert: "
+                        + name + " -> " + ip + ":" + port);
+            }
+
+            // =================================================
+            // CLIENTLIST
+            // =================================================
+
+            else if (input.equalsIgnoreCase("clientlist")) {
+
+                if (recipients.isEmpty()) {
+                    System.out.println("Keine gespeicherten Empfänger.");
+                } else {
+                    System.out.println("Gespeicherte Empfänger:");
+
+                    for (Map.Entry<String, InetSocketAddress> entry : recipients.entrySet()) {
+                        InetSocketAddress address = entry.getValue();
+
+                        System.out.println("- "
+                                + entry.getKey()
+                                + " -> "
+                                + address.getAddress().getHostAddress()
+                                + ":"
+                                + address.getPort());
+                    }
+                }
+            }
+
+            // =================================================
+            // SENDALL
+            // sendall <Nachricht>
+            // =================================================
+
+            else if (input.startsWith("sendall ")) {
+
+                String message = input.substring("sendall ".length());
+
+                if (recipients.isEmpty()) {
+                    System.out.println("Keine gespeicherten Empfänger.");
+                    continue;
+                }
+
+                for (Map.Entry<String, InetSocketAddress> entry : recipients.entrySet()) {
+                    sendMessage(socket, ownName, entry.getValue(), message);
+                }
+
+                System.out.println("Nachricht an alle gespeicherten Empfänger gesendet.");
+            }
+
+            // =================================================
+            // SEND TO REGISTERED NAME
+            // send <Name> <Nachricht>
+            // =================================================
+
+            else if (input.startsWith("send ")) {
+
+                String[] parts = input.split("\\s+", 3);
+
+                if (parts.length != 3) {
+                    System.out.println("Usage: send <Name> <Nachricht>");
+                    System.out.println("Oder: sendraw <IP-Adresse> <Port> <Nachricht>");
+                    continue;
+                }
+
+                String targetName = parts[1];
+                String message = parts[2];
+
+                InetSocketAddress target = recipients.get(targetName);
+
+                if (target == null) {
+                    System.out.println("Empfänger nicht gefunden: " + targetName);
+                    continue;
+                }
+
+                sendMessage(socket, ownName, target, message);
+            }
+
+            // =================================================
+            // SENDRAW: old direct sending style
+            // sendraw <ip> <port> <message>
+            // =================================================
+
+            else if (input.startsWith("sendraw ")) {
+
+                String[] parts = input.split("\\s+", 4);
+
+                if (parts.length != 4) {
+                    System.out.println("Usage: sendraw <IP-Adresse> <Port> <Nachricht>");
                     continue;
                 }
 
                 String ip = parts[1];
-
-                int port =
-                        Integer.parseInt(parts[2]);
-
+                int port = Integer.parseInt(parts[2]);
                 String message = parts[3];
 
-                String finalMessage =
-                        ownName + ": " + message;
+                InetSocketAddress target =
+                        new InetSocketAddress(InetAddress.getByName(ip), port);
 
-                byte[] data =
-                        finalMessage.getBytes("UTF-8");
-
-                DatagramPacket packet =
-                        new DatagramPacket(
-                                data,
-                                data.length,
-                                InetAddress.getByName(ip),
-                                port
-                        );
-
-                socket.send(packet);
+                sendMessage(socket, ownName, target, message);
             }
 
             // =================================================
             // EXIT
             // =================================================
 
-            else if (input.equals("exit")) {
+            else if (input.equalsIgnoreCase("exit")) {
 
                 socket.close();
-
                 System.exit(0);
             }
 
@@ -146,14 +230,46 @@ public class UdpClient {
             // HELP
             // =================================================
 
-            else {
+            else if (input.equalsIgnoreCase("help")) {
+                printHelp();
+            }
 
-                System.out.println("Befehle:");
-                System.out.println(
-                        "send <ip> <port> <message>"
-                );
-                System.out.println("exit");
+            else {
+                System.out.println("Unbekannter Befehl.");
+                printHelp();
             }
         }
+    }
+
+    private static void sendMessage(
+            DatagramSocket socket,
+            String ownName,
+            InetSocketAddress target,
+            String message
+    ) throws Exception {
+
+        String finalMessage = ownName + ": " + message;
+
+        byte[] data = finalMessage.getBytes(StandardCharsets.UTF_8);
+
+        DatagramPacket packet =
+                new DatagramPacket(
+                        data,
+                        data.length,
+                        target.getAddress(),
+                        target.getPort()
+                );
+
+        socket.send(packet);
+    }
+
+    private static void printHelp() {
+        System.out.println("Befehle:");
+        System.out.println("register <Name> <IP-Adresse> <Port>");
+        System.out.println("clientlist");
+        System.out.println("send <Name> <Nachricht>");
+        System.out.println("sendall <Nachricht>");
+        System.out.println("sendraw <IP-Adresse> <Port> <Nachricht>");
+        System.out.println("exit");
     }
 }
